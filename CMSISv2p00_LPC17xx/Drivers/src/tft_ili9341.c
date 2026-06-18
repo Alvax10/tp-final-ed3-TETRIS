@@ -11,6 +11,7 @@
 #include "LPC17xx.h"   /* CMSIS — ajustar path según tu toolchain */
 #include <stdlib.h>    /* abs() */
 #include "tft_ili9341.h"
+#include "tetris_display.h"
 
 /* =========================================================
  *  Macros de GPIO
@@ -187,32 +188,31 @@ void delay_ms(uint32_t ms) {
  *        Ejemplo: 60 MHz / (2 * 3) = 10 MHz
  */
 static void ssp0_init(void) {
-
     // 1. Alimentar SSP0 (PCONP bit 21)
     LPC_SC->PCONP |= (1u << 21);
 
-    // 2. PCLK_SSP0 = CCLK (bits 21:20 de PCLKSEL1 = 01)
+    // 2. PCLK_SSP0 = CCLK
     LPC_SC->PCLKSEL1 &= ~(3u << 20);
-    LPC_SC->PCLKSEL1 |=  (1u << 20);   // PCLK = CCLK → CCLK = 100 MHz
+    LPC_SC->PCLKSEL1 |=  (1u << 20);   // PCLK = 100 MHz
 
-    // 3. Pinsel P0.15(SCK), P0.17(MISO), P0.18(MOSI) → función SSP0
+    // 3. Pines P0.15, P0.17, P0.18 para SSP0
     LPC_PINCON->PINSEL0 &= ~(3u << 30);
-    LPC_PINCON->PINSEL0 |=  (2u << 30); // P0.15 SCK0
+    LPC_PINCON->PINSEL0 |=  (2u << 30); // SCK0
 
     LPC_PINCON->PINSEL1 &= ~((3u << 2) | (3u << 4));
-    LPC_PINCON->PINSEL1 |=  ((2u << 2) | (2u << 4)); // P0.17 MISO0, P0.18 MOSI0
+    LPC_PINCON->PINSEL1 |=  ((2u << 2) | (2u << 4)); // MISO0, MOSI0
 
     /* 4. Configurar SSP0 */
     LPC_SSP0->CR0  = (7u << 0)   /* DSS: 8-bit */
                    | (0u << 4)   /* FRF: SPI */
                    | (0u << 6)   /* CPOL: idle LOW */
                    | (0u << 7)   /* CPHA: captura en flanco 1 */
-                   | (2u << 8);  /* SCR: divisor adicional → 20 MHz */
+                   | (0u << 8);  /* <--- CORREGIDO: SCR = 2 → 100MHz / (2 * (2+1)) = 16.6 MHz */
 
-    LPC_SSP0->CPSR = 2u;         /* CPSDVSR = 2  (debe ser par, ≥2) */
+    LPC_SSP0->CPSR = 2u;         /* CPSDVSR = 2 */
 
-    /* 5. Habilitar SSP0 como Master */
-    LPC_SSP0->CR1  = (1u << 1);  /* SSE=1, MS=0 (master) */
+    /* 5. Habilitar Master */
+    LPC_SSP0->CR1  = (1u << 1);
 }
 
 /**
@@ -222,13 +222,12 @@ static inline void ssp0_send(uint8_t byte) {
 
     while (!(LPC_SSP0->SR & (1u << 1))){};  /* espera TNF (TX FIFO no lleno) */
     LPC_SSP0->DR = byte;
-    while (LPC_SSP0->SR & (1u << 2))     /* drena RX FIFO */
-        (void)LPC_SSP0->DR;
+    while (LPC_SSP0->SR & (1u << 2)) (void)LPC_SSP0->DR; /* drena RX FIFO */
 }
 
 /** @brief Limpia lo que termino de recibir
  */
-static inline void ssp0_flush(void)
+inline void ssp0_flush(void)
 {
     while (LPC_SSP0->SR & (1u << 4)) {};    /* espera BSY=0 */
     while (LPC_SSP0->SR & (1u << 2))     /* drena resto de RX */
@@ -386,6 +385,11 @@ void tft_init(tft_rotation_t rot) {
 
     gpio_ctrl_init();
     ssp0_init();
+
+    LPC_SC->PCONP |= (1u << 29);      // Habilitar energía del bloque DMA
+    LPC_GPDMA->DMACConfig = 1u;       // Habilitar controlador DMA global
+    while (!(LPC_GPDMA->DMACConfig & 1u));
+
     ili9341_hw_init();
     tft_set_rotation(rot);
 }
@@ -438,30 +442,28 @@ void tft_draw_pixel(int16_t x, int16_t y, uint16_t color) {
     TFT_CS_HIGH();
 }
 
-void tft_fill_screen(uint16_t color) {
+void tft_fill_screen(uint16_t color)
+{
 
     tft_set_addr_window(0, 0, TFT_WIDTH - 1, TFT_HEIGHT - 1);
-    /* Pre-calcular los dos bytes del color una sola vez. */
+
     const uint8_t hi = (uint8_t)(color >> 8);
     const uint8_t lo = (uint8_t)(color & 0xFF);
 
-    uint32_t total = (uint32_t)TFT_WIDTH * TFT_HEIGHT; /* 76800 */
 
-    while (total >= 4) {
-        /* Esperar TX FIFO Empty (TFE, bit 0): garantiza 8 huecos libres */
-        while (!(LPC_SSP0->SR & (1u << 0))) {};
+    uint32_t blocks = 19200u;
 
-        /* 4 píxeles = 8 bytes, sin esperas intermedias */
-        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
-        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
-        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
-        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
+    while (blocks--) {
+        /* Esperar FIFO completamente vacía → 8 huecos garantizados */
+        while (!(LPC_SSP0->SR & (1u << 0)));  /* TFE */
 
-        total -= 4;
+        /* Volcar 4 píxeles = 8 bytes sin ninguna espera intermedia */
+        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
+        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
+        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
+        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
     }
 
-    /* Esperar que el shift register vacíe el último byte antes de CS_HIGH */
-    while (LPC_SSP0->SR & (1u << 4)) {}; /* BSY */
     ssp0_flush();
     TFT_CS_HIGH();
 }
@@ -469,6 +471,22 @@ void tft_fill_screen(uint16_t color) {
 /* =========================================================
  *  GFX — Líneas
  * ========================================================= */
+
+void gfx_draw_wire_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+
+	tft_set_addr_window(x, y, x + w -1, y);
+	for (int16_t i = 0; i < w; i++) ssp0_send16(color);
+	tft_set_addr_window(x, y + h -1, x + w -1, y + h -1);
+	for (int16_t i = 0; i < w; i++) ssp0_send16(color);
+	tft_set_addr_window(x, y, x, y + h -1);
+	for (int16_t i = 0; i < h; i++) ssp0_send16(color);
+	tft_set_addr_window(x + w -1, y, x + w -1, y + h -1);
+	for (int16_t i = 0; i < h; i++) ssp0_send16(color);
+
+	ssp0_flush();
+	TFT_CS_HIGH();
+
+}
 
 void gfx_draw_hline(int16_t x, int16_t y, int16_t w, uint16_t color) {
 
@@ -517,10 +535,13 @@ void gfx_draw_line(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t colo
 /* =========================================================
  *  GFX — Rectángulos
  * ========================================================= */
-uint16_t gfx_get_color(uint32_t pieza) {
 
-    switch (pieza >> 16) {
+uint16_t gfx_get_color_by_enum(uint8_t color_Enum) {
 
+    switch (color_Enum) {
+
+    	case 0:
+            return TFT_BLACK; // LA FIGURA I
         case 1:
             return TETRIS_CYAN; // LA FIGURA I
         case 2:
@@ -556,6 +577,13 @@ uint16_t gfx_get_color(uint32_t pieza) {
     }
 }
 
+uint16_t gfx_get_color(uint32_t pieza) {
+
+	return gfx_get_color_by_enum(pieza >> 16);
+
+}
+
+
 void gfx_draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
 
     gfx_draw_hline(x, y, w, color);
@@ -564,40 +592,51 @@ void gfx_draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
     gfx_draw_vline(x+w-1, y, h, color);
 }
 
-void gfx_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
-
-    /* Enviar bloque de píxeles en una sola ventana — muy eficiente */
-    if ((x >= (int16_t)_width)  || (y >= (int16_t)_height)) return;
+void gfx_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color)
+{
+    /* Clipping */
+    if ((x >= (int16_t)_width) || (y >= (int16_t)_height)) return;
     if (w <= 0 || h <= 0) return;
-
     if (x + w > (int16_t)_width)  w = (int16_t)_width  - x;
     if (y + h > (int16_t)_height) h = (int16_t)_height - y;
 
-    tft_set_addr_window((uint16_t)x, (uint16_t)y,(uint16_t)(x+w-1), (uint16_t)(y+h-1));
+    /*
+     * tft_set_addr_window() deja CS=LOW y DC=HIGH al retornar.
+     * No repetir esos pines aquí.
+     */
+    tft_set_addr_window((uint16_t)x, (uint16_t)y,
+                        (uint16_t)(x + w - 1), (uint16_t)(y + h - 1));
+
+    const uint8_t hi = (uint8_t)(color >> 8);
+    const uint8_t lo = (uint8_t)(color & 0xFF);
     uint32_t total = (uint32_t)w * (uint32_t)h;
 
-    while (total >= 16) {
-        ssp0_send16(color); ssp0_send16(color); ssp0_send16(color); ssp0_send16(color);
-        ssp0_send16(color); ssp0_send16(color); ssp0_send16(color); ssp0_send16(color);
-        ssp0_send16(color); ssp0_send16(color); ssp0_send16(color); ssp0_send16(color);
-        ssp0_send16(color); ssp0_send16(color); ssp0_send16(color); ssp0_send16(color);
+    /*
+     * Bloques de 4 píxeles (8 bytes = FIFO llena exacta).
+     * Esperar TFE garantiza los 8 huecos antes de cada volcado.
+     * El tail maneja los 0–3 píxeles sobrantes byte a byte con TNF.
+     */
+    while (total >= 4u) {
+        while (!(LPC_SSP0->SR & (1u << 0)));  /* TFE: 8 huecos libres */
 
-        total -= 16; // Le restamos 16 de golpe a la cuenta
+        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
+        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
+        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
+        LPC_SSP0->DR = hi; LPC_SSP0->DR = lo;
+
+        total -= 4u;
     }
 
-    // 5. Limpieza (por si el tamaño del bloque no era múltiplo exacto de 16)
+    /* Tail: 0–3 píxeles sobrantes */
     while (total--) {
-        ssp0_send16(color);
+        while (!(LPC_SSP0->SR & (1u << 1)));  /* TNF */
+        LPC_SSP0->DR = hi;
+        while (!(LPC_SSP0->SR & (1u << 1)));
+        LPC_SSP0->DR = lo;
     }
-    ssp0_flush();
-    TFT_CS_HIGH();
 }
 
 void gfx_draw_mini_tetris_block(int16_t x, int16_t y, uint32_t dataPieza) {
-
-    /* Enviar bloque de píxeles en una sola ventana — muy eficiente */
-    tft_set_addr_window(x, x,(uint16_t)(x+TAM_BLOQUE_PX-1), (uint16_t)(y+TAM_BLOQUE_PX-1));
-
     uint16_t color;
     int altura = 0;
     int16_t py = 0;
@@ -606,17 +645,17 @@ void gfx_draw_mini_tetris_block(int16_t x, int16_t y, uint32_t dataPieza) {
     // ESTE NUMERO ES EL SELECTOR DEL COLOR (LOS ULTIMOS 16 BITS DEL "ARRAY"
     color = gfx_get_color(dataPieza);
 
-    for (int i = 0; i <= 16; i++) {
+    for (int i = 0; i < 16; i++) {
 
         int modulo_4 = i%4;
         if (modulo_4 == 0 && i != 0) {
             altura ++;
         }
 
-        if ((dataPieza & (1 << i)) != 0) {
-            px = x + (i * TAM_MINI_BLOQUE_PX);
+        if (dataPieza & (0x8000 >> i)) {
+            px = x + (modulo_4 * TAM_MINI_BLOQUE_PX);
             py = y + (altura * TAM_MINI_BLOQUE_PX);
-            gfx_draw_rect(px, py, TAM_MINI_BLOQUE_PX, TAM_MINI_BLOQUE_PX, color);
+            gfx_draw_wire_rect(px, py, TAM_MINI_BLOQUE_PX, TAM_MINI_BLOQUE_PX, color);
         }
     }
 
@@ -627,7 +666,8 @@ void gfx_draw_mini_tetris_block(int16_t x, int16_t y, uint32_t dataPieza) {
 void gfx_draw_tetris_block(int16_t x, int16_t y, uint32_t dataPieza) {
 
     /* Enviar bloque de píxeles en una sola ventana — muy eficiente */
-    tft_set_addr_window(x, y,(uint16_t)(x+TAM_BLOQUE_PX-1), (uint16_t)(y+TAM_BLOQUE_PX-1));
+	x = MAPA_X0 + x * TAM_BLOQUE_PX +1;
+	y = MAPA_Y0 + y * TAM_BLOQUE_PX +1;
 
     uint16_t color;
     int altura = 0;
@@ -637,17 +677,16 @@ void gfx_draw_tetris_block(int16_t x, int16_t y, uint32_t dataPieza) {
     // ESTE NUMERO ES EL SELECTOR DEL COLOR (LOS ULTIMOS 16 BITS DEL "ARRAY"
     color = gfx_get_color(dataPieza);
 
-    for (int i = 0; i <= 16; i++) {
-
+    for (int i = 0; i < 16; i++) {
         int modulo_4 = i%4;
         if (modulo_4 == 0 && i != 0) {
             altura ++;
         }
 
         if (dataPieza & (0x8000 >> i)) {
-            px = x + (i * TAM_BLOQUE_PX);
+            px = x + (modulo_4 * TAM_BLOQUE_PX);
             py = y + (altura * TAM_BLOQUE_PX);
-            gfx_draw_rect(px, py, TAM_BLOQUE_PX, TAM_BLOQUE_PX, color);
+            gfx_draw_wire_rect(px, py, TAM_BLOQUE_PX, TAM_BLOQUE_PX, color);
         }
     }
 
@@ -657,8 +696,11 @@ void gfx_draw_tetris_block(int16_t x, int16_t y, uint32_t dataPieza) {
 
 void gfx_fill_tetris_block(int16_t x, int16_t y, uint32_t dataPieza) {
 
+	x = MAPA_X0 + x * TAM_BLOQUE_PX + 1;
+	y = MAPA_Y0 + y * TAM_BLOQUE_PX + 1;
+
     /* Enviar bloque de píxeles en una sola ventana — muy eficiente */
-    tft_set_addr_window(x, y,(uint16_t)(x+TAM_BLOQUE_PX-1), (uint16_t)(y+TAM_BLOQUE_PX-1));
+    tft_set_addr_window(x, y,(uint16_t)(x+(TAM_BLOQUE_PX*4)-1), (uint16_t)(y+(TAM_BLOQUE_PX*4)-1));
 
     uint16_t color;
     int altura = 0;
@@ -668,15 +710,15 @@ void gfx_fill_tetris_block(int16_t x, int16_t y, uint32_t dataPieza) {
     // ESTE NUMERO ES EL SELECTOR DEL COLOR (LOS ULTIMOS 16 BITS DEL "ARRAY"
     color = gfx_get_color(dataPieza);
 
-    for (int i = 0; i <= 16; i++) {
+    for (int i = 0; i < 16; i++) {
 
         int modulo_4 = i%4;
         if (modulo_4 == 0 && i != 0) {
             altura ++;
         }
 
-        if ((dataPieza & (1 << i)) != 0) {
-            px = x + (i * TAM_BLOQUE_PX);
+        if (dataPieza & (0x8000 >> i)) {
+            px = x + (modulo_4 * TAM_BLOQUE_PX);
             py = y + (altura * TAM_BLOQUE_PX);
             gfx_fill_rect(px, py, TAM_BLOQUE_PX, TAM_BLOQUE_PX, color);
         }

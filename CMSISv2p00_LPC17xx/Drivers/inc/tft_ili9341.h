@@ -49,32 +49,32 @@
  * ============================================= */
 
 // ------------------ COLORES DEL JUEGO ------------------------------
-#define TETRIS_AMARILLO TFT_COLOR(200, 200, 200)
-#define TETRIS_NARANJA TFT_COLOR(142, 142, 142)
-#define TETRIS_VERDE TFT_COLOR(160, 160, 160)
-#define TETRIS_GRIS TFT_COLOR(100, 100, 100)
-#define TETRIS_CYAN TFT_COLOR(168, 168, 168)
-#define TETRIS_VIOLETA TFT_COLOR(95, 95, 95)
+#define TETRIS_AMARILLO TFT_COLOR(255, 200, 46)
+#define TETRIS_NARANJA TFT_COLOR(246, 126, 20)
+#define TETRIS_VIOLETA TFT_COLOR(221, 10, 178)
+#define TETRIS_VERDE TFT_COLOR(70, 132, 22)
+#define TETRIS_ROJO TFT_COLOR(226, 35, 26)
+#define TETRIS_CYAN TFT_COLOR(1, 237, 250)
+#define TETRIS_AZUL TFT_COLOR(28, 85, 139)
 #define TFT_WHITE TFT_COLOR(255, 255, 255)
-#define TETRIS_AZUL TFT_COLOR(73, 73, 73)
-#define TETRIS_ROJO TFT_COLOR(91, 91, 91)
+#define TETRIS_GRIS TFT_COLOR(96, 96, 96)
 #define TFT_BLACK TFT_COLOR(7, 7, 7)
 
 // ------------------ SOMBRAS DE LOS COLORES PRINCIPALES --------------
-#define TETRIS_AMARILLO_SOMBRA TFT_COLOR(130, 130, 130)
-#define TETRIS_NARANJA_SOMBRA TFT_COLOR(110, 110, 110)
-#define TETRIS_VIOLETA_SOMBRA TFT_COLOR(68, 68, 68)
-#define TETRIS_CYAN_SOMBRA TFT_COLOR(94, 94, 94)
-#define TETRIS_VERDE_SOMBRA TFT_COLOR(50, 50, 50)
-#define TETRIS_AZUL_SOMBRA TFT_COLOR(42, 42, 42)
+#define TETRIS_VIOLETA_SOMBRA TFT_COLOR(96, 41, 99)
+#define TETRIS_NARANJA_SOMBRA TFT_COLOR(185, 91, 8)
+#define TETRIS_AMARILLO_SOMBRA TFT_COLOR(161, 131, 46)
+#define TETRIS_CYAN_SOMBRA TFT_COLOR(33, 119, 124)
+#define TETRIS_VERDE_SOMBRA TFT_COLOR(44, 78, 18)
+#define TETRIS_AZUL_SOMBRA TFT_COLOR(19, 48, 75)
 #define TETRIS_GRIS_SOMBRA TFT_COLOR(44, 44, 44)
-#define TETRIS_ROJO_SOMBRA TFT_COLOR(50,50, 50)
+#define TETRIS_ROJO_SOMBRA TFT_COLOR(114,23, 19)
 
 // -------------------------- COLORES DE LA UI -------------------------
-#define TETRIS_SELECTION_MODE TFT_COLOR(120, 120, 120)
-#define TETRIS_WINNER_COLOR TFT_COLOR(102, 102, 102)
+#define TETRIS_SELECTION_MODE TFT_COLOR(246, 126, 20)
+#define TETRIS_WINNER_COLOR TFT_COLOR(70, 132, 22)
 #define TETRIS_LOSER_COLOR TETRIS_ROJO
-#define TETRIS_STARS TFT_WHITE
+#define TETRIS_STARS TETRIS_AMARILLO
 
 /** Convierte componentes R,G,B (0-255) a RGB565 */
 #define TFT_COLOR(r, g, b) \
@@ -99,10 +99,6 @@ typedef enum {
     TFT_ROT_270 = 3,   /**< Landscape invertido */
 } tft_rotation_t;
 
-typedef struct {
-     uint8_t mapa_matricial[18][11];
-} MapaTetris;
-
 /* =========================================================
  *  Fuente de texto integrada (5×7 px, ASCII 32–126)
  * ========================================================= */
@@ -120,6 +116,12 @@ void delay_ms(uint32_t ms);
  * @param rot  Orientación inicial del display.
  */
 void tft_init(tft_rotation_t rot);
+
+/**
+ * @brief Limpia SSP0 y el controlador ILI9341.
+ *        Debe llamarse antes de llamar a TFT_CS_HIGH().
+ */
+void ssp0_flush();
 
 /**
  * @brief Cambia la rotación del display en tiempo de ejecución.
@@ -189,6 +191,14 @@ void gfx_draw_vline(int16_t x, int16_t y, int16_t h, uint16_t color);
 **/
 void gfx_draw_line(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color);
 
+/** @Brief Cualquier bloque de una pieza de tetris
+ * int16_t w: información del ancho
+ * int16_t h: información del alto
+ * int16_t x: Primer pixel de x de la pieza completa en el display
+ * int16_t y: Primer pixel de y de la pieza completa en el display
+**/
+void gfx_draw_wire_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
+
 /** @Brief Rectángulo vacío
  * int16_t x: Posición en x del display
  * int16_t y: Posición en y del display
@@ -206,6 +216,10 @@ void gfx_draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
  * uint16_t color: Color del rectángulo
 **/
 void gfx_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
+
+uint16_t gfx_get_color(uint32_t piece);
+uint16_t gfx_get_color_by_enum(uint8_t color_enum);
+
 
 /** @Brief Cualquier bloque de una pieza de tetris miniatura para la UI NEXT PIECE
  * int16_t x: Posición en x donde empieza a dibujarse el bloque
@@ -231,13 +245,6 @@ void gfx_draw_tetris_block(int16_t x, int16_t y, uint32_t pieza);
 **/
 void gfx_fill_tetris_block(int16_t x, int16_t y, uint32_t dataPieza);
 
-/** @Brief Actualiza todo lo que se necesita actualizar del mapa
- * LINES_BEHAVIOR lines_behavior: Añade o remueve líneas
- * int lines: Cantidad de líneas a remover/agregar
- * Mapa_tetris *mapa_tetris: Matriz completa del mapa del juego
- * Example: 0x44444 ( primer 4: color, el resto muestra la pieza I )
-**/
-void gfx_render_map(int lines, MapaTetris *mapaTetris);
 
 /** @Brief Círculo vacío (Bresenham)
  * int16_t x0: Primer pixel de x del circulo en el display
